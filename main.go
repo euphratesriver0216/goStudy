@@ -1,80 +1,238 @@
-//슬라이스 (일종의 자료구조)
 package main
 
-import "fmt"
+import (
+	"context"
+	"encoding/json"
+	"log"
+	"net/http"
+	"os"
+	"os/signal"
+	"strings"
+	"time"
+
+	"github.com/go-chi/chi"
+	"github.com/go-chi/chi/middleware"
+	"github.com/thedevsaddam/renderer"
+	mgo "gopkg.in/mgo.v2"
+	"gopkg.in/mgo.v2/bson"
+)
+
+var rnd *renderer.Render
+var db *mgo.Database
+
+const (
+	hostName       string = "localhost:27017"
+	dbName         string = "demo_todo"
+	collectionName string = "todo"
+	port           string = ":5000"
+)
+
+type (
+	todoModel struct {
+		ID        bson.ObjectId `bson:"_id,omitempty"`
+		Title     string        `bson:"title"`
+		Completed bool          `bson:"completed"`
+		CreatedAt time.Time     `bson:"createAt"`
+	}
+
+	todo struct {
+		ID        string    `json:"id"`
+		Title     string    `json:"title"`
+		Completed bool      `json:"completed"`
+		CreatedAt time.Time `json:"created_at"`
+	}
+)
+
+func init() {
+	rnd = renderer.New()
+	sess, err := mgo.Dial(hostName)
+	checkErr(err)
+	sess.SetMode(mgo.Monotonic, true)
+	db = sess.DB(dbName)
+}
+
+func homeHandler(w http.ResponseWriter, r *http.Request) {
+	err := rnd.Template(w, http.StatusOK, []string{"static/home.tpl"}, nil)
+	checkErr(err)
+}
+
+func createTodo(w http.ResponseWriter, r *http.Request) {
+	var t todo
+
+	if err := json.NewDecoder(r.Body).Decode(&t); err != nil {
+		rnd.JSON(w, http.StatusProcessing, err)
+		return
+	}
+
+	// simple validation
+	if t.Title == "" {
+		rnd.JSON(w, http.StatusBadRequest, renderer.M{
+			"message": "The title field is requried",
+		})
+		return
+	}
+
+	// if input is okay, create a todo
+	tm := todoModel{
+		ID:        bson.NewObjectId(),
+		Title:     t.Title,
+		Completed: false,
+		CreatedAt: time.Now(),
+	}
+	if err := db.C(collectionName).Insert(&tm); err != nil {
+		rnd.JSON(w, http.StatusProcessing, renderer.M{
+			"message": "Failed to save todo",
+			"error":   err,
+		})
+		return
+	}
+
+	rnd.JSON(w, http.StatusCreated, renderer.M{
+		"message": "Todo created successfully",
+		"todo_id": tm.ID.Hex(),
+	})
+}
+
+func updateTodo(w http.ResponseWriter, r *http.Request) {
+	id := strings.TrimSpace(chi.URLParam(r, "id"))
+
+	if !bson.IsObjectIdHex(id) {
+		rnd.JSON(w, http.StatusBadRequest, renderer.M{
+			"message": "The id is invalid",
+		})
+		return
+	}
+
+	var t todo
+
+	if err := json.NewDecoder(r.Body).Decode(&t); err != nil {
+		rnd.JSON(w, http.StatusProcessing, err)
+		return
+	}
+
+	// simple validation
+	if t.Title == "" {
+		rnd.JSON(w, http.StatusBadRequest, renderer.M{
+			"message": "The title field is requried",
+		})
+		return
+	}
+
+	// if input is okay, update a todo
+	if err := db.C(collectionName).
+		Update(
+			bson.M{"_id": bson.ObjectIdHex(id)},
+			bson.M{"title": t.Title, "completed": t.Completed},
+		); err != nil {
+		rnd.JSON(w, http.StatusProcessing, renderer.M{
+			"message": "Failed to update todo",
+			"error":   err,
+		})
+		return
+	}
+
+	rnd.JSON(w, http.StatusOK, renderer.M{
+		"message": "Todo updated successfully",
+	})
+}
+
+func fetchTodos(w http.ResponseWriter, r *http.Request) {
+	todos := []todoModel{}
+
+	if err := db.C(collectionName).
+		Find(bson.M{}).
+		All(&todos); err != nil {
+		rnd.JSON(w, http.StatusProcessing, renderer.M{
+			"message": "Failed to fetch todo",
+			"error":   err,
+		})
+		return
+	}
+
+	todoList := []todo{}
+	for _, t := range todos {
+		todoList = append(todoList, todo{
+			ID:        t.ID.Hex(),
+			Title:     t.Title,
+			Completed: t.Completed,
+			CreatedAt: t.CreatedAt,
+		})
+	}
+
+	rnd.JSON(w, http.StatusOK, renderer.M{
+		"data": todoList,
+	})
+}
+
+func deleteTodo(w http.ResponseWriter, r *http.Request) {
+	id := strings.TrimSpace(chi.URLParam(r, "id"))
+
+	if !bson.IsObjectIdHex(id) {
+		rnd.JSON(w, http.StatusBadRequest, renderer.M{
+			"message": "The id is invalid",
+		})
+		return
+	}
+
+	if err := db.C(collectionName).RemoveId(bson.ObjectIdHex(id)); err != nil {
+		rnd.JSON(w, http.StatusProcessing, renderer.M{
+			"message": "Failed to delete todo",
+			"error":   err,
+		})
+		return
+	}
+
+	rnd.JSON(w, http.StatusOK, renderer.M{
+		"message": "Todo deleted successfully",
+	})
+}
 
 func main() {
-	// 모든 언어는 자료구조를 중요하게 여긴다.
-	//데이터를 얼마만큼 효율적으로 메모리를 사용하느냐가 중요
-	//슬라이스 : 동적배열 (자동으로  배열크기를 증가시켜준다. / 가변적이다)
-	//슬라이싱을 이용해 데이터 일부를 불러 올 수 있다.
-	//길이가 요소 개수에 따라 자동으로 증가해 관리가 편하다.
-	//슬라이싱 기능을 사용해서 배열의 일부를 나타내는 슬라이스를 만들 수 있다.
-	// 불편한거를 한방에 처리 할 수 있다.
+	stopChan := make(chan os.Signal)
+	signal.Notify(stopChan, os.Interrupt)
 
-	//var arr[10] int  10개까지 만듦 //인티저 타입의 배열 10개를 생성// 배열을 0
+	r := chi.NewRouter()
+	r.Use(middleware.Logger)
+	r.Get("/", homeHandler)
 
-	// 슬라이스를 초기화 하지 안으면 길이가 0인 슬라이스가 만들어진다.
-	var slice []int // 슬라이스 배열 선언 //매우간단함
+	r.Mount("/todo", todoHandlers())
 
-	if len(slice) == 0 {
-		fmt.Println("슬라이스가 비어 있다.", slice)
-	}
-	// slice[1] = 10 // 할당되지 않음 메모리 공간에 접근  -> 에러가 발생한다.
-	// fmt.Println(slice)
-
-	//{}를 사용한 초기화
-	//var slice1 = []int {1,2,3}
-	var slice2 = []int{1, 5: 2, 10: 3}
-	fmt.Println(slice2)
-
-	//var arr = [...]int{1,2,3}//이것이 배열
-	//var slice = []int{1,2,3}//슬라이스
-
-	//make() 함수를 이용한 초기화
-	//var slice3 = make([]int, 3) //내장되어 있는 함수임 이 함수를 사용해서 첫번째 인수로 타입을 넣어주고, 두번째 인수는 길이를 넣어준다.
-
-	//슬라이스 접근 : 배열과 같다
-	var slice4 = make([]int, 3)
-	slice4[1] = 5 //[0,5,0]
-
-	var slice5 = make([]int, 5)
-
-	//슬라이스 순회  -> 동적으로 길이가 배열과 동일함.
-	//초기화
-	for i := 0; i < len(slice5); i++ {
-		slice5[i] = i + 1
-	}
-	//출력
-	for _, v := range slice5 {
-		fmt.Println((v))
+	srv := &http.Server{
+		Addr:         port,
+		Handler:      r,
+		ReadTimeout:  60 * time.Second,
+		WriteTimeout: 60 * time.Second,
+		IdleTimeout:  60 * time.Second,
 	}
 
-	//요소추가
-	//
-	var slice6 = []int{1, 2, 3}
-	//첫번째 인수 : 추가하려는 슬라이스, 두번째 인수에는 추가하려는 요소
-	slice7 := append(slice6, 4) //추가
+	go func() {
+		log.Println("Listening on port ", port)
+		if err := srv.ListenAndServe(); err != nil {
+			log.Printf("listen: %s\n", err)
+		}
+	}()
 
-	fmt.Println(slice6)
-	fmt.Println(slice7)
-	//append : 첫번째 인수로 들어온 슬라이스이 값을 변경하는게 아니라 요소가 추가된 새로운 슬라이스를 반환
-	//기존 슬라이스에 요소를 추가하고 싶다면 append()결과를 기존 슬라이스에 대입해서 변경해야함
+	<-stopChan
+	log.Println("Shutting down server...")
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	srv.Shutdown(ctx)
+	defer cancel()
+	log.Println("Server gracefully stopped!")
+}
 
-	var slice8 []int
-	//포문으로 하나씩 추가
-	for i := 0; i <= 10; i++ {
-		slice8 = append(slice8, i)
+func todoHandlers() http.Handler {
+	rg := chi.NewRouter()
+	rg.Group(func(r chi.Router) {
+		r.Get("/", fetchTodos)
+		r.Post("/", createTodo)
+		r.Put("/{id}", updateTodo)
+		r.Delete("/{id}", deleteTodo)
+	})
+	return rg
+}
+
+func checkErr(err error) {
+	if err != nil {
+		log.Fatal(err) //respond with error page or message
 	}
-	slice8 = append(slice8, 11, 3, 315, 123)
-	fmt.Println(slice8)
-
-	// type sliceHeader struct {
-	// 	Data uintptr // 실제 배열을 가리키는 포인터
-	// 	Len  int     // 요소 개수    (length : len 길이의 줄임말 )
-	// 	Cap  int     // 실제 배열의 길이  (capacity: cap 용량의 줄임말)
-	// }
-
-	//포인터를 사용하면 연산 속도가 빠르다.
-
 }
